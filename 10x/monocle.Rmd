@@ -1,0 +1,119 @@
+---
+title   : "Monocle Trajectory Reconstruction"
+subtitle: "TH1 - Cell Ranger clusters 2 and 4"
+author  : "Frederick J Tan"
+date    : "April 20, 2018"
+output  :
+  html_notebook:
+    toc: true
+---
+
+## Configure environment
+
+- Add location of pre-installed 10x R packages
+
+```{r}
+.libPaths( "/mnt/sequence/10x/R/3.4.3" )
+```
+
+## Cell Ranger R Kit
+
+- Explore 10x Cell Ranger results using [Cell Ranger R Kit](https://support.10xgenomics.com/single-cell-gene-expression/software/pipelines/latest/rkit)
+
+#### Load package
+
+```{r message=FALSE}
+library( "cellrangerRkit" )
+```
+
+#### Load dataset
+
+- Generally stored in `/mnt/sequence/10x`
+
+```{r}
+TH1.gbm <- load_cellranger_matrix( "/mnt/sequence/10x/TH1_count" )
+TH1.analysis <- load_cellranger_analysis_results( "/mnt/sequence/10x/TH1_count" )
+```
+
+## Monocle
+
+- Create a trajectory corresponding to a biological process such as cell differentiation using [Monocle](http://cole-trapnell-lab.github.io/monocle-release/docs/)
+
+#### Load package
+
+```{r message=FALSE}
+library( "Seurat" )
+library( "monocle" )
+```
+
+#### Load dataset
+
+```{r}
+TH1.data <- Read10X( "/mnt/sequence/10x/TH1_count/outs/filtered_gene_bc_matrices/mm10" )
+TH1.seurat <- CreateSeuratObject( TH1.data, project="TH1" )
+
+TH1 <- importCDS( TH1.seurat )
+```
+
+#### Use Cell Ranger cluster assignments
+
+```{r}
+pData( TH1 )$Cluster10x = TH1.analysis$clustering$graphclust$Cluster
+```
+
+#### Subset cells
+
+```{r}
+TH1_24 <- TH1[ , pData( TH1 )$Cluster10x %in% c( 2, 4 ) ]
+```
+
+#### Estimate sizeFactors and dispersions
+
+```{r}
+TH1_24 <- estimateSizeFactors( TH1_24 )
+TH1_24 <- estimateDispersions( TH1_24 )
+```
+
+#### Prioritize genes for ordering
+
+- Start with genes expressed in >5% of cells
+
+```{r}
+TH1_24 <- detectGenes( TH1_24, min_expr=0.1 )
+fData( TH1_24 )$use_for_ordering <- fData( TH1_24 )$num_cells_expressed > 0.05 * ncol( TH1_24 )
+```
+
+- Clustering cells
+
+```{r}
+TH1_24 <- reduceDimension( TH1_24, reduction_method='tSNE' )
+TH1_24 <- clusterCells( TH1_24 )
+```
+
+- Identify genes that vary between clusters
+
+```{r}
+TH1_24_expressed_genes <- row.names( subset( fData( TH1_24 ), num_cells_expressed >= 10 ) )
+TH1_24_clustering_DEG_genes <- differentialGeneTest( TH1_24[ TH1_24_expressed_genes, ], fullModelFormulaStr="~Cluster" )
+```
+
+#### Create trajectory
+
+```{r}
+TH1_24_ordering_genes <- row.names( TH1_24_clustering_DEG_genes )[ order( TH1_24_clustering_DEG_genes$qval ) ][ 1:1000 ]
+TH1_24 <- setOrderingFilter( TH1_24, ordering_genes=TH1_24_ordering_genes )
+
+TH1_24 <- reduceDimension( TH1_24, method="DDRTree" )
+TH1_24 <- orderCells( TH1_24 )
+
+table( pData( TH1_24 )$State )
+
+plot_cell_trajectory( TH1_24, color_by="State" )
+plot_genes_jitter( TH1_24[ goi, ], grouping="State" )
+plot_genes_in_pseudotime( TH1_24[ goi, ], color_by="State" )
+```
+
+
+
+
+

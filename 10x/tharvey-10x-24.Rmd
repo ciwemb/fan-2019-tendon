@@ -1,0 +1,416 @@
+---
+title: "Tyler Harvey - TH1"
+author: "Tyler Harvey"
+date: "April 11, 2018"
+output: html_notebook
+---
+## Load programs
+
+- Point to 10x library
+
+```{r}
+.libPaths( "/mnt/sequence/10x/R/3.4.3" )
+.libPaths()
+```
+
+- Load Cell Ranger R Kit, etc.
+
+```{r message=FALSE}
+library( "cellrangerRkit" )
+library( "Seurat" )
+library( "monocle" )
+
+library( "stringr" )
+library( "dplyr" )
+```
+
+
+## Load data
+
+```{r}
+TH1.gbm <- load_cellranger_matrix( "/mnt/sequence/10x/TH1_count" )
+TH1.analysis <- load_cellranger_analysis_results( "/mnt/sequence/10x/TH1_count" )
+
+TH1.data <- Read10X( "/mnt/sequence/10x/TH1_count/outs/filtered_gene_bc_matrices/mm10" )
+TH1.seurat <- CreateSeuratObject( TH1.data, project="TH1" )
+
+TH1 <- importCDS( TH1.seurat )
+```
+
+
+## Visualize Cell Ranger results
+
+- clusters
+    - 2: sheath ... Tppp3, some Pdgfra
+        - dual vs tom
+    - 3: FAP ... Pdgfra
+        - gfp
+    - 4: tenocyte ... Scx Mkx
+
+```{r}
+tsne_proj <- TH1.analysis$tsne
+visualize_clusters( TH1.analysis$clustering$graphclust$Cluster, 
+                    tsne_proj[ c( "TSNE.1", "TSNE.2" ) ],
+                    marker_size=1.0 )
+```
+
+- marker genes
+
+```{r}
+use_genes <- get_nonzero_genes( TH1.gbm )
+gbm_bcnorm <- normalize_barcode_sums_to_median( TH1.gbm[ use_genes, ] )
+gbm_log <- log_gene_bc_matrix( gbm_bcnorm, base=10 )
+
+goi2<- c("Tppp3","Pdgfra","Scx","Fmod")
+goi3<- c("Mkx","Pdgfrl","Tnc","Tnmd","Ly6e")
+visualize_gene_markers( gbm_log, goi, tsne_proj[ c( "TSNE.1", "TSNE.2" ) ] )
+```
+
+
+## Annotate Monocle cells with Cell Ranger clusters
+
+```{r}
+table( rownames( pData( TH1 ) ) == str_sub( TH1.analysis$clustering$graphclust$Barcode, 1, -3 ) )
+pData( TH1 )$Cluster10x = TH1.analysis$clustering$graphclust$Cluster
+```
+
+#### Tabulate cells with 1 or more marker gene transcripts
+
+```{r}
+goi <- c( "Tppp3", "Scx", "Mkx", "Pdgfra" )
+for (i in goi ) {
+  pData( TH1 )[ , i ] <- exprs( TH1 )[ i, ] >= 1
+}
+
+pData( TH1 ) %>%
+  group_by( Cluster10x ) %>%
+  summarize( n=n(),
+             Tppp3=sum( Tppp3==TRUE ),
+             Scx=sum( Scx==TRUE ),
+             Mkx=sum( Mkx==TRUE ),
+             Pdgfra=sum( Pdgfra==TRUE ) )
+```
+
+## Re-analyze sheath and tenocytes
+
+#### Subset cells
+
+```{r}
+coi <- pData( TH1 )$Cluster10x %in% c( 2, 4 )
+TH1_24 <- TH1[ , coi ]
+```
+
+#### Cluster cells
+
+```{r}
+TH1_24 <- estimateSizeFactors( TH1_24 )
+TH1_24 <- estimateDispersions( TH1_24 )
+
+TH1_24 <- detectGenes( TH1_24, min_expr=0.1 )
+fData( TH1_24 )$use_for_ordering <- fData( TH1_24 )$num_cells_expressed > 0.05 * ncol( TH1_24 )
+
+TH1_24 <- reduceDimension( TH1_24, reduction_method='tSNE' )
+TH1_24 <- clusterCells( TH1_24 )
+
+table( pData( TH1_24 )[ , c( "Cluster", "Cluster10x" ) ] )
+plot_cell_clusters( TH1_24, color_by="Cluster" )
+```
+
+#### Construct trajectory
+
+- ~20 minutes
+- VGAM not found if `cores=8`
+
+```{r eval=FALSE}
+TH1_24_expressed_genes <- row.names( subset( fData( TH1_24 ), num_cells_expressed >= 10 ) )
+TH1_24_clustering_DEG_genes <- differentialGeneTest( TH1_24[ TH1_24_expressed_genes, ], fullModelFormulaStr="~Cluster" )
+TH1_24_clustering_DEG_genes
+save( TH1_24_clustering_DEG_genes, file="TH1_24_clustering_DEG_genes.Rda" )
+write.csv( TH1_24_clustering_DEG_genes, file="TH1_24_clustering_DEG_genes.csv")
+```
+
+```{r}
+load( "TH1_24_clustering_DEG_genes.Rda" )
+
+TH1_24_ordering_genes <- row.names( TH1_24_clustering_DEG_genes )[ order( TH1_24_clustering_DEG_genes$qval ) ][ 1:1000 ]
+TH1_24_ordering_genes
+TH1_24 <- setOrderingFilter( TH1_24, ordering_genes=TH1_24_ordering_genes )
+
+TH1_24 <- reduceDimension( TH1_24, method="DDRTree" )
+TH1_24 <- orderCells( TH1_24 )
+
+plot_cell_trajectory( TH1_24, color_by="State" )
+plot_genes_jitter( TH1_24[ goi, ], grouping="State" )
+plot_genes_in_pseudotime( TH1_24[ goi, ], color_by="State" )
+plot_genes_jitter( TH1_24[ goi2, ], grouping="State" )
+plot_genes_in_pseudotime( TH1_24[ goi2, ], color_by="State" )
+plot_genes_jitter( TH1_24[ goi3, ], grouping="State" )
+plot_genes_in_pseudotime( TH1_24[ goi3, ], color_by="State" )
+
+```
+
+## Re-order Genes in Plot
+
+```{r}
+TH1_test <- TH1_24[ goi2, ]
+
+fData( TH1_test )$gene_short_name <- c( "1Tppp3","2Pdgfra","3Scx","4Fmod" )
+fData( TH1_test )
+
+plot_genes_in_pseudotime( TH1_test, color_by="State" )
+
+```
+
+
+#### Tabulate markers in states
+
+```{r}
+pData( TH1_24 ) %>%
+  mutate( Tppp3Pdgfra = Tppp3 & Pdgfra) %>%
+  mutate( Tppp3PdgfraScx = Tppp3 & Pdgfra & Scx) %>%
+  mutate( Tppp3Scx = Tppp3 & Scx) %>%
+  mutate( ScxMkx = Scx & Mkx) %>%
+  group_by( State ) %>%
+  summarize( n=n(),
+             Tppp3=sum( Tppp3==TRUE ),
+             Scx=sum( Scx==TRUE ),
+             Mkx=sum( Mkx==TRUE ),
+             Pdgfra=sum( Pdgfra==TRUE ),
+             Tppp3Pdgfra=sum(Tppp3Pdgfra==TRUE),
+             Tppp3Scx=sum(Tppp3Scx==TRUE),
+             Tppp3PdgfraScx=sum(Tppp3PdgfraScx==TRUE),
+             ScxMkx=sum(ScxMkx==TRUE))
+```
+
+##Find genes enriched in any State in pseudotime
+```{r}
+TH1_24_DEG_genes_state <- differentialGeneTest( TH1_24[ TH1_24_ordering_genes, ], fullModelFormulaStr="~State" )               
+TH1_24_DEG_genes_state
+write.csv(TH1_24_DEG_genes_state, file="TH1_24_DEG_genes_state.csv")
+
+table( TH1_24_DEG_genes_state$qval < 1e-5 )
+
+```
+
+##Find genes enriched in State1 in pseudotime
+
+#### Regenerate a clean copy of TH1_24
+
+```{r}
+TH1_24 <- TH1[ , coi ]
+TH1_24 <- estimateSizeFactors( TH1_24 )
+TH1_24 <- estimateDispersions( TH1_24 )
+TH1_24 <- detectGenes( TH1_24, min_expr=0.1 )
+fData( TH1_24 )$use_for_ordering <- fData( TH1_24 )$num_cells_expressed > 0.05 * ncol( TH1_24 )
+TH1_24 <- reduceDimension( TH1_24, reduction_method='tSNE' )
+TH1_24 <- clusterCells( TH1_24 )
+TH1_24 <- setOrderingFilter( TH1_24, ordering_genes=TH1_24_ordering_genes )
+TH1_24 <- reduceDimension( TH1_24, method="DDRTree" )
+TH1_24 <- orderCells( TH1_24 )
+plot_cell_trajectory( TH1_24, color_by="State" )
+```
+
+#### Work with a copy of TH1_24
+
+```{r}
+TH1_24_markers <- TH1_24[ TH1_24_ordering_genes, ]
+
+pData( TH1_24_markers ) <- cbind( pData( TH1_24_markers ), model.matrix( ~ 0 + State, data=pData( TH1_24_markers ) ) )
+
+TH1_24_markers_df <- data.frame(
+  qval1 = differentialGeneTest( TH1_24_markers, fullModelFormulaStr="~State1" )$qval,
+  umi1  = apply( exprs( TH1_24_markers[ , pData( TH1_24_markers )$State1 == 1 ] ), 1, mean ),
+  qval2 = differentialGeneTest( TH1_24_markers, fullModelFormulaStr="~State2" )$qval,
+  umi2  = apply( exprs( TH1_24_markers[ , pData( TH1_24_markers )$State2 == 1 ] ), 1, mean ),
+  qval3 = differentialGeneTest( TH1_24_markers, fullModelFormulaStr="~State3" )$qval,
+  umi3  = apply( exprs( TH1_24_markers[ , pData( TH1_24_markers )$State3 == 1 ] ), 1, mean ),
+  qval4 = differentialGeneTest( TH1_24_markers, fullModelFormulaStr="~State4" )$qval,
+  umi4  = apply( exprs( TH1_24_markers[ , pData( TH1_24_markers )$State4 == 1 ] ), 1, mean ),
+  qval5 = differentialGeneTest( TH1_24_markers, fullModelFormulaStr="~State5" )$qval,
+  umi5  = apply( exprs( TH1_24_markers[ , pData( TH1_24_markers )$State5 == 1 ] ), 1, mean )
+)
+TH1_24_markers_df
+write.csv( TH1_24_markers_df, file="TH1_24_markers_state.csv")
+```
+
+```{r}
+TH1_24_markers_df %>%
+  tibble::rownames_to_column() %>%
+  filter( umi1 == pmax( umi1, umi2, umi3, umi4, umi5 ) ) %>%
+  arrange( qval1 )
+```
+
+```{r}
+goi_1 <- TH1_24_markers_df %>%
+  tibble::rownames_to_column() %>%
+  filter( umi1 == pmax( umi1, umi2, umi3, umi4, umi5 ) ) %>%
+  arrange( qval1 ) %>%
+  pull( rowname )
+plot_genes_jitter( TH1_24_markers[ goi_1[1:4], ], color_by="State" )
+plot_genes_in_pseudotime( TH1_24_markers[ goi_1[1:4], ] )
+write.csv(goi_1, file="state1.csv")
+TH1_24_markers[goi_1]
+```
+
+```{r}
+goi_2 <- TH1_24_markers_df %>%
+  tibble::rownames_to_column() %>%
+  filter( umi2 == pmax( umi1, umi2, umi3, umi4, umi5 ) ) %>%
+  arrange( qval2 ) %>%
+  pull( rowname )
+plot_genes_jitter( TH1_24_markers[ goi_2[1:4], ], color_by="State" )
+plot_genes_in_pseudotime( TH1_24_markers[ goi_2[1:4], ] )
+write.csv(goi_2, file="state2.csv")
+TH1_24_markers[goi_2]
+```
+
+```{r}
+goi_3 <- TH1_24_markers_df %>%
+  tibble::rownames_to_column() %>%
+  filter( umi3 == pmax( umi1, umi2, umi3, umi4, umi5 ) ) %>%
+  arrange( qval3 ) %>%
+  pull( rowname )
+plot_genes_jitter( TH1_24_markers[ goi_3[1:5], ], color_by="State" )
+plot_genes_in_pseudotime( TH1_24_markers[ goi_3[1:5], ] )
+write.csv(goi_3, file="state3.csv")
+TH1_24_markers[goi_3]
+```
+
+```{r}
+goi_4 <- TH1_24_markers_df %>%
+  tibble::rownames_to_column() %>%
+  filter( umi4 == pmax( umi1, umi2, umi3, umi4, umi5 ) ) %>%
+  arrange( qval4 ) %>%
+  pull( rowname )
+plot_genes_jitter( TH1_24_markers[ goi_4[1:5], ], color_by="State" )
+plot_genes_in_pseudotime( TH1_24_markers[ goi_4[1:5], ] )
+write.csv(goi_4, file="state4.csv")
+TH1_24_markers[goi_4]
+```
+
+```{r}
+goi_5 <- TH1_24_markers_df %>%
+  tibble::rownames_to_column() %>%
+  filter( umi5 == pmax( umi1, umi2, umi3, umi4, umi5 ) ) %>%
+  arrange( qval5 ) %>%
+  pull( rowname )
+plot_genes_jitter( TH1_24_markers[ goi_5[1:10], ], color_by="State" )
+plot_genes_in_pseudotime( TH1_24_markers[ goi_5[1:10], ] )
+write.csv(goi_5, file="state5.csv")
+TH1_24_markers[goi_5]
+```
+### Extracing UMIs and qval for all genes
+```{r}
+TH1_24_markers2 <- TH1_24
+
+pData( TH1_24_markers2 ) <- cbind( pData( TH1_24_markers2 ), model.matrix( ~ 0 + State, data=pData( TH1_24_markers2 ) ) )
+
+TH1_24_markers2_df <- data.frame(
+  qval1 = differentialGeneTest( TH1_24_markers2, fullModelFormulaStr="~State1" )$qval,
+  umi1  = apply( exprs( TH1_24_markers2[ , pData( TH1_24_markers2 )$State1 == 1 ] ), 1, mean ),
+  qval2 = differentialGeneTest( TH1_24_markers2, fullModelFormulaStr="~State2" )$qval,
+  umi2  = apply( exprs( TH1_24_markers2[ , pData( TH1_24_markers2 )$State2 == 1 ] ), 1, mean ),
+  qval3 = differentialGeneTest( TH1_24_markers2, fullModelFormulaStr="~State3" )$qval,
+  umi3  = apply( exprs( TH1_24_markers2[ , pData( TH1_24_markers2 )$State3 == 1 ] ), 1, mean ),
+  qval4 = differentialGeneTest( TH1_24_markers2, fullModelFormulaStr="~State4" )$qval,
+  umi4  = apply( exprs( TH1_24_markers2[ , pData( TH1_24_markers2 )$State4 == 1 ] ), 1, mean ),
+  qval5 = differentialGeneTest( TH1_24_markers2, fullModelFormulaStr="~State5" )$qval,
+  umi5  = apply( exprs( TH1_24_markers2[ , pData( TH1_24_markers2 )$State5 == 1 ] ), 1, mean )
+)
+TH1_24_markers2_df
+write.csv( TH1_24_markers2_df, file="TH1_24_markers2_state.csv")
+```
+#### Tyler's Original Code
+
+```{r}
+TH1_24_DEG_genes_state1 <- pData( TH1 )$State1 == 1
+TH1_24_DEG_genes_state1over <- differentialGeneTest( TH1_24[ TH1_24_ordering_genes, ], fullModelFormulaStr="~State1" )
+TH1_24_DEG_genes_state1over
+write.csv(TH1_24_DEG_genes_state1, file="TH1_24_DEG_genes_state1.csv")
+```
+
+##Compare state 4 and 5 tenocytes; identify genes
+
+```{r}
+ TH1_24_BEAM <- BEAM( TH1_24, branch_point=2 )
+ 
+``` 
+ 
+##Generate heatmaps
+```{r}
+ TH1_24_BEAM <- TH1_24_BEAM[ order( TH1_24_BEAM$qval ), ]
+ TH1_24_BEAM <- TH1_24_BEAM[ , c( "gene_short_name", "pval", "qval" ) ]
+
+ plot_genes_branched_heatmap( TH1_24[ row.names( subset( TH1_24_BEAM, qval < 1e-5 ) ), ],
+                              branch_point=1, num_clusters=4, use_gene_short_name=TRUE, show_rownames=TRUE )
+
+
+
+```
+
+
+
+##Compare state 1 and 2 Sheath cells; identify genes
+
+```{r}
+ TH1_24_BEAM2 <- BEAM( TH1_24, branch_point=1 )
+ 
+``` 
+ 
+##Generate heatmap for branch point 1 BEAM analysis
+```{r}
+ TH1_24_BEAM2 <- TH1_24_BEAM2[ order( TH1_24_BEAM2$qval ), ]
+ TH1_24_BEAM2 <- TH1_24_BEAM2[ , c( "gene_short_name", "pval", "qval" ) ]
+
+ pdf("TH_24_BEAMbranch1.pdf")
+ plot_genes_branched_heatmap( TH1_24[ row.names( subset( TH1_24_BEAM2, qval < 1e-5 ) ), ],
+                              branch_point=1, num_clusters=4, use_gene_short_name=TRUE, show_rownames=TRUE )
+ dev.off()
+
+
+```
+
+
+##Generate pseudotime trajectories with specified marker gene of interest with reversed scale color
+```{r}
+scale_color_viridis(..., alpha = 1, begin = 0, end = 1, direction = -1, discrete = FALSE, option = "D") 
+
+pData( TH1_24 )
+plot_cell_trajectory( TH1_24, markers="Pdgfra", use_color_gradient=TRUE, direction = -1, option = "E" )
+plot_cell_trajectory( TH1_24, markers="Scx", use_color_gradient=TRUE, direction = -1, option = "A" )
+plot_cell_trajectory( TH1_24, markers="Tppp3", use_color_gradient=TRUE, option = "E" )
+plot_cell_trajectory( TH1_24, markers="Mkx", use_color_gradient=TRUE, direction = -1, option = "A" )
+plot_cell_trajectory( TH1_24, markers="Fmod", use_color_gradient=TRUE )
+plot_cell_trajectory( TH1_24, markers="Tnmd", use_color_gradient=TRUE )
+plot_cell_trajectory( TH1_24, markers="Pdgfrl", use_color_gradient=TRUE )
+plot_cell_trajectory( TH1_24, markers="Ly6e", use_color_gradient=TRUE )
+plot_cell_trajectory( TH1_24, markers="Lama4", use_color_gradient=TRUE )
+plot_cell_trajectory( TH1_24, markers="Plin2", use_color_gradient=TRUE )
+plot_pseudotime_heatmap(TH1_24)
+```
+
+ 
+##Subset states 1,3,5 from TH1_24 for pseudotime trajectory plotting
+```{r}
+TH1_24[,pData(TH1_24)$State %in% c(1,3,5)]
+plot_genes_in_pseudotime( (TH1_24[goi2, pData(TH1_24)$State %in% c(1,3,5)]), color_by="State" )
+plot_genes_in_pseudotime( TH1_24[goi3,pData(TH1_24)$State %in% c(1,3,5)], color_by="State" )
+
+TH1_test <- TH1_24[ goi2, ]
+
+fData( TH1_test )$gene_short_name <- c( "1Tppp3","2Pdgfra","3Scx","4Fmod" )
+fData( TH1_test )
+?scale_color_viridis
+plot_genes_in_pseudotime( TH1_test, color_by="State" )
+
+TH1_24_new <- TH1_24[, pData(TH1_24)$State %in% c(1,3,5)]
+TH1_24_new <- TH1_24_new[ goi2, ]
+fData( TH1_24_new )$gene_short_name <- c( "1Tppp3","2Pdgfra","3Scx","4Fmod" ) 
+plot_genes_in_pseudotime( TH1_24_new, color_by="State" )
+
+```
+
+#To determine nUMI per cell and nGene per cell
+```{r}
+summary(pData(TH1)$nGene)
+```

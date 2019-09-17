@@ -1,0 +1,105 @@
+---
+title: "Regeneration_3population"
+author: "Tyler Harvey"
+date: "4/10/2018"
+output: html_document
+---
+## Load programs [do I need to point to gene_exp.diff??]
+
+- Point to Cuffdiff output for 3 populations from ECESCX
+```{r}
+.libPaths( "/mnt/sequence/harvey/git/tendon/Dual_GFP_Tom_regeneration_diffout" )
+.libPaths()
+```
+
+## Load programs and configure [need to load CummeRbund package and others]
+
+
+```{r}
+source("https://bioconductor.org/biocLite.R")
+biocLite("cummeRbund")
+
+library( "cummeRbund")
+library( "dplyr")
+library( "tidyr")
+
+options( "width"=100 )
+```
+
+## Load data
+
+
+
+```{r}
+cuff <- readCufflinks( "results")
+cuff
+```
+
+
+```{r}
+runInfo( cuff)[1:2,]
+```
+
+##Diagnostic plots
+
+```{r}
+MDSplot( genes( cuff), replicates=TRUE )
+MDSplot( genes( cuff ), "Dual", "GFPinj" )
+MDSplot( genes( cuff ), "Dual", "Tominj" )
+MDSplot( genes( cuff ), "GFPinj", "Tominj" )
+```
+
+##Check positive/negative controls GOIs
+```{r}
+goi <- c( "Tppp3","Pdgfra","Scx","Mkx","Bgn","Ctgf","Dcn","Fn1","Fmod","Tnc","Tnmd")
+expressionPlot( getGenes(cuff,goi), replicates=TRUE, showStatus=FALSE) +
+  facet_wrap("tracking_id",scales="free_y")+
+  theme( legend.position="none")
+```
+
+```{r}
+diffData( genes( cuff ) ) %>%
+  filter( gene_id %in% goi,
+          !(sample_1 == "Dual" & sample_2 == "GFPinj" ) ) %>%
+  select( -test_stat, -p_value ) %>%
+  arrange( gene_id )
+```
+
+##First, only consider genes with FPKM > 5 in any condition [want to be >5 in at least one, not necessarily both]
+```{r}
+goi_gt5 <- diffData( genes( cuff ) ) %>%
+  filter( !( sample_1 == "Dual" & sample_2 == "GFPinj" ) ) %>%
+  group_by( gene_id ) %>%
+  summarize( value_max=max( value_1, value_2 ) ) %>%
+  filter( value_max > 5 ) %>%
+  pull( gene_id )
+length( goi_gt5 )
+```
+
+
+
+##Cluster using Jensen-Shannon distance and partitioning around medoids
+```{r}
+a <- getGenes( cuff, df$gene_id )
+clusters <- c(5,8)
+for ( i in clusters ) {
+  ic <- csCluster( a, k=i )
+  df <- cbind(df, ic$clustering[ match( df$gene_id, names( ic$clustering ) ) ] )
+  
+  p <- csClusterPlot( ic ) +
+    facet_wrap( "cluster" ) +
+    geom_hline( yintercept=2, color="red" )+
+    annotate( "text", label=paste( ic$clusinfo[ ,"size" ], "genes" ), x=2, y=4.25) +
+    theme(legend.position="none" )
+  print( p )
+}
+
+names( df ) <- c("gene_id", paste( "cluster", clusters, sep=""))
+filter(df, gene_id %in% goi)
+write.csv( df, file="clusters.both.csv", row.names = FALSE)
+```
+
+##Document program versions
+```{r}
+sessionInfo()
+```
